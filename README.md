@@ -1,8 +1,8 @@
 # Aposematic_defenses
 Data and R Markdown for analysis of fish feeding trials
 
-## This file accompanies the R Markdown file: Aposematism_workbook.Rmd
-## This file accompanies the data: 2025june11_recopy_data_raw.xlsx
+This file accompanies the R Markdown file: Aposematism_workbook.Rmd
+This file accompanies the data: 2025june11_recopy_data_raw.xlsx
 
 General overview of the data are:
 Observations collected for multiple individuals of multiple species of fish during feeding trials where fish were presented with multiple food types consecutively. For each feeding presentation (a single food type with a specific food treatment), the fish were observed for 1 min in 20 s intervals. A fourth time interval ~8-10 min. later was used to record the final outcome of the feeding presentation for the food. There were 2 food types, and 4 food treatments, resulting in 8 different prey given to each fish in their trials, along with 2 positive controls. Fish has a pre-trial series testing food types under a different protocol, and then were given food under trial conditions with a finalized protocol that was standardized across all trials.
