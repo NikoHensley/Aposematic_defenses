@@ -1,0 +1,2132 @@
+---
+title: "Unpalatability_clean_up"
+author: "FIRST AUTHOR INITIALS"
+date: "2026-02-16"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(tidyverse)
+library(EnvStats)
+library(lme4)
+library(gtsummary)
+library(emmeans)
+library(glmmTMB)
+library(prediction)
+library(ggeffects)
+library(multcomp)
+library(multcompView)
+library(report)
+library(performance)
+library(readxl)
+library(ggpubr)
+library(patchwork)
+library(report)
+library(parameters)
+library(ggnewscale)
+library(performance)
+library(ggh4x)
+source("./plotting_function.R")
+```
+
+## Load in the data and meta data for the fishes
+
+```{r, echo=FALSE}
+data <- read_xlsx(path = "./2025june11_recopy_data_raw.xlsx",sheet = 1,trim_ws = TRUE,col_names = TRUE)
+meta <- read_xlsx(path = "./2025june11_recopy_data_raw.xlsx",sheet = 2,trim_ws = TRUE,col_names = TRUE)
+data_merged <- left_join(data,meta,by = "ind_id")
+
+```
+
+## Clean up the data
+
+```{r data clean, echo=FALSE}
+data_reduced <- data_merged %>%
+  mutate(
+    treatment = case_when(treatment == "anesthetized" ~ "anaesthetized", .default = treatment),
+    type = case_when(
+      type == "luminous" ~ "luminescent",
+      type == "nonluminous" ~ "nonluminescent",
+      .default = type
+    ),
+    time_point = factor(time_point,ordered = TRUE,levels = c(1,2,3,4)),
+    ind_id = as.factor(ind_id),
+    trial_time = as.factor(trial_time),
+    food_sample = as.factor(food_sample),
+    treatment = as.factor(treatment),
+    type = as.factor(type),
+    eaten = as.factor(eaten),
+    luminescence = as.factor(luminescence),
+    species = as.factor(species),
+    genus = as.factor(genus),
+    ecology = as.factor(ecology),
+    days_captive = date - date_captured,
+    feeding_id = interaction(ind_id, trial, food_sample, treatment),
+    trial_id = interaction(ind_id, trial),
+    sample_id = interaction(food_sample, treatment),
+    exp_id = interaction(ind_id, trial, order, food_sample, treatment)
+  ) %>%
+  group_by(ind_id) %>% arrange(trial, order, time_point) %>%
+  mutate(
+    luminescence_experience = cumsum(replace_na(num_luminescence, 0)),
+    photeros_opportunity = case_when(type == "luminescent" ~ 1, .default = NA),
+    photeros_experience = cumsum(coalesce(photeros_opportunity, 0)) / 4 + photeros_opportunity *
+      0,
+    luminescence_experience = case_when(
+      luminescence_experience == 0 & photeros_experience > 0 ~ 0,
+      .default = luminescence_experience
+    ),
+    photeros_attack = case_when(
+      type == "luminescent" ~ replace_na(num_attacks, 0),
+      TRUE ~ 0
+      ),
+    photeros_attack_experience = cumsum(photeros_attack)
+    ) %>%
+  ungroup() %>%
+  drop_na(eaten) %>%
+  mutate(
+    num_attacks = case_when(
+      eaten == "no" & num_attacks < 1 ~ 0,
+      trial_protocol != "pre-trial" &
+        eaten == "no" & is.na(num_attacks) ~ 0,
+      .default = num_attacks
+    ),
+    attacked = as.factor(ifelse(num_attacks > 0, "yes", "no")),
+    luminescence = case_when(
+      is.na(luminescence) &
+        type == "luminescent" & treatment == "live" ~ "no",
+      .default = luminescence
+    ),
+    luminescence = case_when(
+      type == "luminescent" & treatment == "live" & time_point == 4 ~ NA,
+      .default = luminescence
+    ),
+    rejected = case_when(
+      attacked == "yes" & eaten == "no" ~ "Rejected",
+      attacked == "yes" &
+        eaten == "yes" ~ "Eaten",
+      attacked == "no" &
+        eaten == "no" ~ "Ignored/Avoided"
+    ),
+    rejected = as.factor(rejected)
+  )  %>%
+  arrange(ind_id, trial, order, time_point) %>%
+  group_by(trial_protocol, ind_id) %>%
+  mutate(min_trial = min(trial), max_trial = max(trial)) %>%
+  ungroup() %>% group_by(species, trial) %>%
+  mutate(relative_trial = (trial - min_trial) + 1) %>%
+  ungroup() %>%
+  group_by(exp_id) %>%
+  arrange(trial, order, time_point) %>%
+  mutate(
+    roll_num_attack = cumsum(num_attacks),
+    behavior = case_when(
+      eaten == "yes" ~ "Eaten",
+      eaten == "no" &
+        attacked == "yes" ~ "Rejected",
+      eaten == "no" &
+        attacked == "no" & roll_num_attack == 0 ~ "Unseen",
+      eaten == "no" &
+        attacked == "no" & roll_num_attack > 0 ~ "Avoided"
+    ),
+    behavior = as.factor(behavior),
+  ) %>% ungroup()
+
+```
+
+## Visualize the attack proportions for each food type, each fish, and the time to consumption for each fish. These are supplementary plots
+
+```{r Supplement Figures}
+SFig2 <- data_reduced %>% 
+  group_by(trial,food_sample,ind_id) %>%
+  summarise(prop_eaten = length(eaten[eaten == "yes"]) / length(eaten)) %>%
+  ggplot(aes(x = trial, y = food_sample)) +
+  geom_tile(aes(fill = prop_eaten)) + 
+  geom_text(aes(label = round(prop_eaten,digits = 2)), color="white",size=2 )+ 
+  theme_minimal(base_size = 16) + facet_wrap(ind_id~.) + xlim(1,7)
+
+SFig3 <- data_reduced %>%
+  group_by(trial,food_sample,ind_id) %>%
+  summarise(prop_attacked = length(attacked[attacked == "yes"]) / length(attacked)) %>%
+  ggplot(aes(x = trial, y = food_sample)) +
+  geom_tile(aes(fill = prop_attacked)) +
+  geom_text(aes(label = round(prop_attacked,digits = 2)), color="white",size=2 )+ 
+  theme_minimal(base_size = 16) + facet_wrap(ind_id~.) + xlim(1,7)
+
+plot(SFig2)
+plot(SFig3)
+
+data_filtered <-  data_reduced %>% 
+  filter(#filtering out the fish that never eat
+                        ind_id != "1d",
+                        ind_id != "5d",
+                        ind_id != "7d",
+                        ind_id != "9d") %>%
+  filter( # filtering out the trials where the fish don't eat any of the foods
+         trial_id != "9a.4",
+         trial_id != "3c.5",
+         trial_id != "3c.6",
+         trial_id != "4c.3")
+```
+
+## Making the final data table ##
+
+```{r multi-state data}
+
+msm_data <- data_filtered %>%
+  group_by(exp_id) %>%
+  arrange(trial,order,time_point) %>%
+  mutate(
+    roll_num_attack = cumsum(num_attacks),
+    behavior = case_when( eaten == "yes" ~ "Eaten",
+                          eaten == "no" & attacked == "yes" ~ "Rejected",
+                          eaten == "no" & attacked == "no" & roll_num_attack == 0 ~ "Unseen",
+                          eaten == "no" & attacked == "no" & roll_num_attack > 0 ~ "Avoided" ),
+    behavior = as.factor(behavior),
+    behavior = relevel(behavior,ref = "Eaten"),
+    behavior_2 = case_when( eaten == "yes" ~ "Eaten",
+                          eaten == "no" & attacked == "yes" ~ "Rejected",
+                          eaten == "no" & attacked == "no" & roll_num_attack == 0 ~ "Ignored/Unseen"
+                          ),
+    behavior_2 = as.factor(behavior_2),
+    behavior_2 = relevel(behavior_2,ref = "Eaten"),
+    behavior_3 = case_when( any(attacked == "yes",na.rm = TRUE) ~ "has attack",.default = "no attack"),
+    treatment_2 = case_when(treatment == "frozen" | treatment == "boiled" ~ "dead",.default = treatment),
+    treatment_2 = as.factor(treatment_2),
+    treatment_2 = relevel(treatment_2, ref = "live"),
+    type = relevel(type, ref = "luminescent")
+  ) %>% ungroup() %>% filter(type != "control") %>% droplevels()
+
+trial_mean <- mean(msm_data$relative_trial, na.rm = TRUE)
+lum_mean   <- mean(msm_data$luminescence_experience, na.rm = TRUE)
+order_mean <- mean(msm_data$order, na.rm = TRUE)
+
+msm_data <- msm_data %>%
+  mutate(
+    relative_trial_c = relative_trial - mean(relative_trial, na.rm = TRUE),
+    luminescence_experience_c = luminescence_experience - mean(luminescence_experience, na.rm = TRUE),
+    order_c = order - mean(order, na.rm = TRUE),
+    order = factor(order,ordered = TRUE,levels = c(1,2,3,4,5,6,7,8,9,10))
+  )
+
+msm_data_filtered <- msm_data %>% filter(behavior_3 == "has attack")
+```
+
+## Looking at the individual time to event data ##
+
+```{r time to event}
+
+ind_p <- msm_data_filtered %>%
+  ggplot(aes(x = time_point, y = ind_id)) +
+  geom_tile(aes(fill = eaten)) +
+  facet_nested(treatment + type ~ relative_trial) +
+  theme_minimal(base_size = 30) +
+  coord_cartesian(ratio = 1) +
+  theme(panel.grid = element_blank())
+
+ind_p
+
+#ggsave(plot = ind_p,filename = "indidivudal_time_to_eat.jpeg",path = ".",height = 10500,width = 2500,dpi = 300,units = "px")
+
+```
+
+## Looking at the relationship between the occurance of attack and the occurance of a luminous response
+
+```{r Attacks and Luminous Responses}
+
+## how many luminescent events occurred with no attacks?
+tb <- msm_data_filtered %>% 
+  filter(food_sample == "photeros",treatment == "live",time_point < 4) %>% 
+  count(luminescence,attacked) %>%
+  pivot_wider(names_from = attacked, values_from = n, values_fill = 0) %>% 
+  dplyr::select(-luminescence)
+
+fisher.test(tb) ## p-value = 1.555e-11
+
+tb_long <- msm_data_filtered %>% 
+  filter(food_sample == "photeros",treatment == "live",time_point < 4) %>% group_by(genus) %>% 
+  count(luminescence,attacked) %>% complete(luminescence,attacked) %>% mutate(n = ifelse(is.na(n),0,n))
+
+library(gridExtra)
+library(grid)
+library(ggpp)
+
+tb_to_add <- tb_long %>%
+  mutate(
+    attacked = as.factor(attacked),
+    luminescence = as.factor(luminescence),
+    N = as.numeric(n),
+    luminescence = str_to_title(luminescence),
+    attacked = str_to_title(attacked),
+    luminescence = fct_relevel(luminescence, c("Yes", "No")),
+    attacked = fct_relevel(attacked, c("Yes", "No"))
+  ) %>%
+  relocate(luminescence, .after = attacked) %>%
+  dplyr::select(genus, attacked, luminescence, N) %>%
+  arrange(genus, attacked, luminescence) %>%
+  rename(
+    "Fish attack" = attacked,
+    "Luminous response" = luminescence
+  )
+
+table_layer_df <- tb_to_add %>%
+  group_by(genus) %>%
+  tidyr::nest(table_data = c(`Fish attack`, `Luminous response`, N)) %>%
+  mutate(
+    x = -Inf,
+    y = Inf
+  )
+
+```
+
+Looking at the relationship between the rate of attack and the rate of luminous response
+
+```{r Looking at attack correlation}
+
+rate_cor_df <- msm_data_filtered %>% 
+  group_by(exp_id) %>% 
+  mutate("was_eaten" = case_when(any(eaten == "yes") ~ "Eaten",.default = "Rejected")) %>% 
+  ungroup() %>% 
+  filter(food_sample == "photeros",treatment == "live",time_point < 4,attacked == "yes") %>% 
+  group_by(exp_id) %>% arrange(time_point) %>% 
+  mutate(num_luminescence = case_when(is.na(num_luminescence) ~ 0,.default = num_luminescence)) %>% droplevels()
+
+rate_model_1 <- glmmTMB(
+  num_luminescence ~ num_attacks*genus + time_point + order + (1| ind_id / trial / sample_id ),
+  family = poisson(),
+  REML = FALSE,
+  data = rate_cor_df %>% filter(genus != "Stegastes"),
+  na.action = na.fail,
+  control = glmmTMBControl(optimizer = optim,optArgs = list(method = "BFGS"))
+  )
+
+drop1(rate_model_1,test = "Chisq") ## don't need time_point or order
+
+rate_model_2 <- glmmTMB(
+  num_luminescence ~ num_attacks*genus + (1| ind_id / trial / sample_id ),
+  family = poisson(),
+  REML = FALSE,
+  data = rate_cor_df %>% filter(genus != "Stegastes"),
+  na.action = na.fail,
+  control = glmmTMBControl(optimizer = optim,optArgs = list(method = "BFGS"))
+  )
+
+rate_model_3 <- glmmTMB(
+  num_luminescence ~ num_attacks*genus + (1| ind_id ),
+  family = poisson(),
+  REML = FALSE,
+  data = rate_cor_df %>% filter(genus != "Stegastes"),
+  na.action = na.fail,
+  control = glmmTMBControl(optimizer = optim,optArgs = list(method = "BFGS"))
+  )
+
+AICcmodavg::aictab(list(rate_model_2,rate_model_3)) ## lower AIC on the 3rd model
+
+test_performance(rate_model_2,rate_model_3) ## more BF support for 3rd model
+
+summary(rate_model_3)
+check_model(rate_model_3)
+check_overdispersion(rate_model_3)
+check_distribution(rate_model_3)
+check_zeroinflation(rate_model_3)
+plot(effects::allEffects(rate_model_3))
+sjPlot::tab_model(rate_model_3,
+                  show.intercept = FALSE,
+                  show.est = TRUE,
+                  show.dev = TRUE,
+                  show.loglik = TRUE,
+                  show.reflvl = TRUE)
+
+report::report_text(rate_model_3)
+
+library(DHARMa)
+sim <- DHARMa::simulateResiduals(rate_model_3)
+DHARMa::plotResiduals(rate_model_3)
+DHARMa::plotQQunif(rate_model_3)
+DHARMa::testZeroInflation(sim)
+DHARMa::testUniformity(sim)
+DHARMa::testDispersion(sim)
+```
+
+Plotting next:
+
+```{r Rate plot}
+
+pred_grid <- rate_cor_df %>% filter(genus != "Stegastes") %>% 
+  group_by(genus) %>%
+  summarise(
+    min_attacks = min(num_attacks, na.rm = TRUE),
+    max_attacks = max(num_attacks, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  rowwise() %>%
+  mutate(
+    num_attacks = list(seq(min_attacks, max_attacks, length.out = 200))
+  ) %>%
+  unnest(num_attacks) %>%
+  mutate(
+    genus = factor(genus, levels = levels(rate_cor_df$genus))
+  )
+
+pred <- predict(
+  rate_model_2,
+  newdata = pred_grid,
+  type = "link",
+  se.fit = TRUE,
+  re.form = NA
+)
+
+plot_df <- pred_grid %>%
+  mutate(
+    fit_link = pred$fit,
+    se_link = pred$se.fit,
+    fit = exp(fit_link),
+    lower = exp(fit_link - 1.96 * se_link),
+    upper = exp(fit_link + 1.96 * se_link)
+  )
+
+my_theme <- ttheme_minimal(
+  base_size = 16,
+  core = list(
+    fg_params = list(fontsize = 14),
+    bg_params = list(
+      fill = alpha("white"),
+      col = NA
+    )
+  ),
+  colhead = list(
+    fg_params = list(
+      fontsize = 16,
+      fontface = "bold"
+    ),
+    bg_params = list(
+      fill = "white",
+      col = NA
+    )
+  )
+)
+
+Figure1 <- rate_cor_df %>% filter(was_eaten == "Rejected") %>%
+  ggplot(aes(x = num_attacks, y = num_luminescence)) +
+  geom_jitter(
+    aes(
+      shape = was_eaten,
+      color = was_eaten,
+      fill = was_eaten
+    ),
+    size = 5,
+    stroke = 1.15,
+    width = 0.05,height = 0.25
+  ) +
+  geom_jitter(
+    data = rate_cor_df %>% filter(was_eaten == "Eaten"),
+    aes(
+      shape = was_eaten,
+      color = was_eaten,
+      fill = was_eaten
+    ),
+    size = 5,
+    stroke = 1.25,
+    width = 0.05,height = 0.25
+  ) +
+  geom_line(
+    data = plot_df %>% rename(num_luminescence = fit),
+    size = 1,
+    color = "#224b5e",
+    aes(x = num_attacks, y = num_luminescence)
+  ) +
+  geom_ribbon(
+    data =  plot_df %>% rename(num_luminescence = fit),
+    aes(ymin = lower, ymax = upper),
+    alpha = 0.25,
+    fill = "#224b5e"
+  ) +
+  theme_bw(base_size = 20) +
+  scale_shape_manual(name = "Final result", values = c("Eaten" = 3, "Rejected" = 21)) +
+  scale_color_manual(name = "Final result",
+                     values = c("Eaten" = "#edc775", "Rejected" = "#94b594")) +
+  scale_fill_manual(name = "Final result",
+                    values = c("Eaten" = "black", "Rejected" = "white")) +
+  xlab("Attack rate\n (fish bites per 20 s)") +
+  ylab("Luminescence rate\n (luminous responses per 20 s)") + facet_grid(. ~
+                                                                           genus, scales = "free_x") +
+  theme(strip.background = element_blank(),
+        strip.text = element_text(face = "italic")) +
+  ggpp::geom_table(
+    data = table_layer_df,
+    aes(
+      x = x,
+      y = y,
+      label = table_data
+    ),table.theme = my_theme,
+    inherit.aes = FALSE,
+    hjust = -0.025,
+    vjust = 1.075,
+    size = 1
+  )
+
+Figure1
+
+```
+
+Save the figure 1
+
+```{r Save Figure 1}
+ggsave(filename = "Figure1.jpeg",plot = Figure1,device = "jpeg",
+       path = "/Users/nicholaihensley/Desktop/Burglar Alarm/submissions/biol_let/secondary/figures/",
+       width = 19,height = 6.5,units = "in",
+       dpi = 300)
+```
+
+As a potential suggestion by reviewers and editors, we can perform the same analysis above but removing the outlier @ x = 5.
+
+```{r Removing the high value outlier}
+
+tb_2.1 <- msm_data_filtered %>% 
+  filter(food_sample == "photeros",treatment == "live",time_point < 4, num_luminescence < 5 | is.na(num_luminescence)) %>%
+  count(luminescence,attacked) %>%
+  pivot_wider(names_from = attacked, values_from = n, values_fill = 0) %>% 
+  dplyr::select(-luminescence)
+
+fisher.test(tb_2.1) # p-value = 1.74e-11
+
+rate_cor_df_2.1 <- msm_data_filtered %>% 
+  group_by(exp_id) %>% 
+  mutate("was_eaten" = case_when(any(eaten == "yes") ~ "Eaten",.default = "Rejected")) %>% 
+  ungroup() %>% 
+  filter(food_sample == "photeros",treatment == "live",time_point < 4,attacked == "yes") %>% 
+  mutate(num_luminescence = case_when(is.na(num_luminescence) ~ 0,.default = num_luminescence)) %>% 
+  filter(num_luminescence < 5,genus != "Stegastes")
+
+rate_model_2.1 <- glmmTMB(
+  num_luminescence ~ num_attacks*genus + (1 | ind_id ),
+  family = poisson(),
+  REML = FALSE,
+  data = rate_cor_df_2.1,
+  na.action = na.fail,
+  #control = glmmTMBControl(optimizer = nlminb,optArgs = list(method = "Nelder-Mead"))
+  )
+
+summary(rate_model_2.1)
+check_model(rate_model_2.1)
+check_overdispersion(rate_model_2.1)
+check_distribution(rate_model_2.1)
+check_zeroinflation(rate_model_1)
+plot(effects::allEffects(rate_model_2.1))
+sjPlot::tab_model(rate_model_2.1,
+                  show.intercept = FALSE,
+                  show.est = TRUE,
+                  show.dev = TRUE,
+                  show.loglik = TRUE,
+                  show.reflvl = TRUE)
+
+report::report_text(rate_model_2.1)
+```
+
+Plotting the supplementary analysis for Figure 1
+
+```{r Plotting the supplementary Fig 1.1}
+pred_grid <- rate_cor_df_2.1 %>% #filter(genus != "Stegastes") %>% 
+  group_by(genus) %>%
+  summarise(
+    min_attacks = min(num_attacks, na.rm = TRUE),
+    max_attacks = max(num_attacks, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  rowwise() %>%
+  mutate(
+    num_attacks = list(seq(min_attacks, max_attacks, length.out = 200))
+  ) %>%
+  unnest(num_attacks) %>%
+  mutate(
+    genus = factor(genus, levels = levels(rate_cor_df$genus))
+  )
+
+pred <- predict(
+  rate_model_2.1,
+  newdata = pred_grid,
+  type = "link",
+  se.fit = TRUE,
+  re.form = NA
+)
+
+plot_df <- pred_grid %>%
+  mutate(
+    fit_link = pred$fit,
+    se_link = pred$se.fit,
+    fit = exp(fit_link),
+    lower = exp(fit_link - 1.96 * se_link),
+    upper = exp(fit_link + 1.96 * se_link)
+  )
+
+FigureS2.1 <- rate_cor_df %>% filter(was_eaten == "Rejected",num_luminescence < 5) %>%
+  ggplot(aes(x = num_attacks, y = num_luminescence)) +
+  geom_jitter(
+    aes(
+      shape = was_eaten,
+      color = was_eaten,
+      fill = was_eaten
+    ),
+    size = 5,
+    stroke = 1.15,
+    width = 0.05,height = 0.25
+  ) +
+  geom_jitter(
+    data = rate_cor_df %>% filter(was_eaten == "Eaten",num_luminescence < 5),
+    aes(
+      shape = was_eaten,
+      color = was_eaten,
+      fill = was_eaten
+    ),
+    size = 5,
+    stroke = 1.25,
+    width = 0.05,height = 0.25
+  ) +
+  geom_line(
+    data = plot_df %>% rename(num_luminescence = fit),
+    size = 1,
+    color = "#224b5e",
+    aes(x = num_attacks, y = num_luminescence)
+  ) +
+  geom_ribbon(
+    data =  plot_df %>% rename(num_luminescence = fit),
+    aes(ymin = lower, ymax = upper),
+    alpha = 0.25,
+    fill = "#224b5e"
+  ) +
+  theme_bw(base_size = 20) +
+  scale_shape_manual(name = "Final result", values = c("Eaten" = 3, "Rejected" = 21)) +
+  scale_color_manual(name = "Final result",
+                     values = c("Eaten" = "#edc775", "Rejected" = "#94b594")) +
+  scale_fill_manual(name = "Final result",
+                    values = c("Eaten" = "black", "Rejected" = "white")) +
+  xlab("Attack rate\n (fish bites per 20 s)") +
+  ylab("Luminescence rate\n (luminous responses per 20 s)") + facet_grid(. ~
+                                                                           genus, scales = "free_x") +
+  theme(strip.background = element_blank(),
+        strip.text = element_text(face = "italic"))
+
+FigureS2.1
+
+ggsave(filename = "FigureS4_1.jpeg",plot = FigureS2.1,device = "jpeg",
+       path = "/Users/nicholaihensley/Desktop/Burglar Alarm/submissions/biol_let/secondary/figures/",
+       width = 19,height = 6.5,units = "in",
+       dpi = 300)
+```
+
+We can also try to perform the same model only including presentations where the food wasn't eaten during the trials (but could still have been eaten in t = 4).
+
+```{r Removing the samples that are eaten during between t = 1,2,3 (n = 9)}
+rate_cor_df_2.2 <- rate_cor_df %>% group_by(exp_id) %>% arrange(time_point) %>% 
+  mutate(eaten_early = case_when(time_point <= 3 & any(eaten == "yes") ~ "eaten_early",.default = "not")) %>% 
+  filter(eaten_early == "not")  %>% 
+  filter(num_luminescence < 5,genus!= "Stegastes")
+
+rate_model_2.2 <- glmmTMB(
+  num_luminescence ~ num_attacks*genus + (1 | ind_id ),
+  family = poisson,
+  REML = FALSE,
+  data = rate_cor_df_2.2,
+  na.action = na.fail,
+  control = glmmTMBControl(optimizer = optim,optArgs = list(method = "L-BFGS-B"))
+  )
+
+summary(rate_model_2.2)
+check_model(rate_model_2.2)
+check_overdispersion(rate_model_2.2)
+check_distribution(rate_model_2.2)
+check_zeroinflation(rate_model_1)
+plot(effects::allEffects(rate_model_2.2))
+sjPlot::tab_model(rate_model_2.2,
+                  show.intercept = FALSE,
+                  show.est = TRUE,
+                  show.dev = TRUE,
+                  show.loglik = TRUE,
+                  show.reflvl = TRUE)
+
+report::report_text(rate_model_2.2)
+```
+
+Plotting the supplementary analysis for Figure 1.2
+
+```{r Plotting the Supplementary Figure 1.2}
+pred_grid <- rate_cor_df_2.2 %>% filter(eaten_early == "not") %>% 
+  group_by(genus) %>%
+  summarise(
+    min_attacks = min(num_attacks, na.rm = TRUE),
+    max_attacks = max(num_attacks, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  rowwise() %>%
+  mutate(
+    num_attacks = list(seq(min_attacks, max_attacks, length.out = 200))
+  ) %>%
+  unnest(num_attacks) %>%
+  mutate(
+    genus = factor(genus, levels = levels(rate_cor_df$genus))
+  )
+
+pred <- predict(
+  rate_model_2.2,
+  newdata = pred_grid,
+  type = "link",
+  se.fit = TRUE,
+  re.form = NA
+)
+
+plot_df <- pred_grid %>%
+  mutate(
+    fit_link = pred$fit,
+    se_link = pred$se.fit,
+    fit = exp(fit_link),
+    lower = exp(fit_link - 1.96 * se_link),
+    upper = exp(fit_link + 1.96 * se_link)
+  )
+
+FigureS2.2 <- rate_cor_df %>% group_by(exp_id) %>% arrange(time_point) %>% 
+  mutate(eaten_early = case_when(time_point <= 3 & any(eaten == "yes") ~ "eaten_early",.default = "not")) %>% 
+  ungroup() %>% 
+  filter(was_eaten == "Rejected",num_luminescence < 5,eaten_early == "not") %>%
+  ggplot(aes(x = num_attacks, y = num_luminescence)) +
+  geom_jitter(
+    aes(
+      shape = was_eaten,
+      color = was_eaten,
+      fill = was_eaten
+    ),
+    size = 5,
+    stroke = 1.15,
+    width = 0.05,height = 0.25
+  ) +
+  geom_jitter(
+    data = rate_cor_df %>% filter(was_eaten == "Eaten",num_luminescence < 5),
+    aes(
+      shape = was_eaten,
+      color = was_eaten,
+      fill = was_eaten
+    ),
+    size = 5,
+    stroke = 1.25,
+    width = 0.05,height = 0.25
+  ) +
+  geom_line(
+    data = plot_df %>% rename(num_luminescence = fit),
+    size = 1,
+    color = "#224b5e",
+    aes(x = num_attacks, y = num_luminescence)
+  ) +
+  geom_ribbon(
+    data =  plot_df %>% rename(num_luminescence = fit),
+    aes(ymin = lower, ymax = upper),
+    alpha = 0.25,
+    fill = "#224b5e"
+  ) +
+  theme_bw(base_size = 20) +
+  scale_shape_manual(name = "Final result", values = c("Eaten" = 3, "Rejected" = 21)) +
+  scale_color_manual(name = "Final result",
+                     values = c("Eaten" = "#edc775", "Rejected" = "#94b594")) +
+  scale_fill_manual(name = "Final result",
+                    values = c("Eaten" = "black", "Rejected" = "white")) +
+  xlab("Attack rate\n (fish bites per 20 s)") +
+  ylab("Luminescence rate\n (luminous responses per 20 s)") + facet_grid(. ~
+                                                                           genus, scales = "free_x") +
+  theme(strip.background = element_blank(),
+        strip.text = element_text(face = "italic"))
+
+FigureS2.2
+
+ggsave(filename = "FigureS4_2.jpeg",plot = FigureS2.2,device = "jpeg",
+       path = "/Users/nicholaihensley/Desktop/Burglar Alarm/submissions/biol_let/secondary/figures/",
+       width = 19,height = 6.5,units = "in",
+       dpi = 300)
+```
+
+Looking at the correlation between experience and time / trial 
+
+```{r Plotting the correlation between experience and time}
+msm_data_filtered %>%
+  ggplot(aes(x = time_point, y = ind_id)) +
+  geom_point(aes(size = luminescence_experience_c)) +
+  facet_nested(relative_trial_c ~ treatment + type) +
+  theme_minimal() + facet_grid(relative_trial~genus)
+```
+
+The genus Stegastes accumulates very little experience, so I will exclude it from the hazard and attack models downstream
+
+## Looking at the Eaten Model
+
+```{r Eaten Model}
+
+hazard_model_1 <- glmmTMB(
+  eaten ~ type + treatment_2 + relative_trial_c + luminescence_experience_c + order + time_point + genus +
+    type:time_point +
+    treatment:time_point +
+    type:luminescence_experience_c +
+    treatment_2:relative_trial_c +
+    type:relative_trial_c +
+    treatment_2:luminescence_experience_c +
+    (1 | ind_id / trial / sample_id ),
+  family = binomial("cloglog"),
+  REML = FALSE,
+  data = msm_data_filtered %>% filter(genus != "Stegastes"), 
+  #using the data set where at least one attack occurs in a trial
+  na.action = na.fail,
+  control = glmmTMBControl(optArgs = list(method = "L-BFGS-B"))
+)
+
+drop1(hazard_model_1,test = "Chisq")
+```
+
+Drop genus, order, type:trial, and treatment:experience are not important without Stegastes in it, so will remove to be consistent with the attack rate model as well, as they don't experience much luminous responses
+
+```{r Eaten Model Round 2}
+hazard_model_2 <- glmmTMB(
+  eaten ~ type + treatment_2 + relative_trial_c + luminescence_experience_c + time_point +
+    # treatment:time_point + # VIF too high to include
+    type:luminescence_experience_c +
+    treatment_2:relative_trial_c +
+    (1 | ind_id / trial / sample_id),
+  family = binomial("cloglog"),
+  REML = FALSE,
+  data = msm_data_filtered %>% filter(genus != "Stegastes"), #using the data set where at least one attack occurs in a trial
+  na.action = na.fail,
+  control = glmmTMBControl(optArgs = list(method = "L-BFGS-B"),optCtrl = list(iter.max = 500))
+)
+
+check_model(hazard_model_2)
+check_collinearity(hazard_model_2)
+```
+
+Model wouldn't fit without removing the less important random effects. Time point interactions are too collinear to use, so dropping those. 
+
+```{r Eaten Model Comparison}
+compare_performance(hazard_model_1,hazard_model_2,rank = TRUE)
+plot(compare_performance(hazard_model_1,hazard_model_2,rank = TRUE))
+test_performance(hazard_model_1,hazard_model_2)
+```
+
+Final model #2 is best for fixed effects. Now testing the random effects best.
+
+```{r Randoem effects comparisons}
+
+hazard_model_2.5 <- glmmTMB(
+  eaten ~ type + treatment_2 + relative_trial_c + luminescence_experience_c + time_point + #genus +
+    type:luminescence_experience_c +
+    treatment_2:relative_trial_c +
+    (1 | ind_id / trial / sample_id ),
+  family = binomial("cloglog"),
+  REML = FALSE,
+  data = msm_data_filtered %>% filter(genus != "Stegastes"),
+  control = glmmTMBControl(optArgs = list(method = "L-BFGS-B"))
+)
+
+hazard_model_3 <- glmmTMB(
+  eaten ~ type + treatment_2 + relative_trial_c + luminescence_experience_c + time_point + #genus +
+    type:luminescence_experience_c +
+    treatment_2:relative_trial_c +
+    (1 | ind_id ),
+  family = binomial("cloglog"),
+  REML = FALSE,
+  data = msm_data_filtered %>% filter(genus != "Stegastes"),
+  control = glmmTMBControl(optArgs = list(method = "L-BFGS-B"))
+)
+
+compare_performance(hazard_model_2.5,hazard_model_3)
+plot(compare_performance(hazard_model_2.5,hazard_model_3,rank = TRUE))
+test_performance(hazard_model_2.5,hazard_model_3)
+```
+
+Hazard model #3 has the best fitting random effects structure
+
+```{r Eaten Model Results}
+summary(hazard_model_3)
+plot(effects::allEffects(hazard_model_3))
+plot(effects::Effect(focal.predictors = "type",mod = hazard_model_3))
+plot(effects::Effect(focal.predictors = "treatment_2",mod = hazard_model_3))
+plot(effects::Effect(focal.predictors = "time_point",mod = hazard_model_3))
+plot(effects::Effect(focal.predictors = "luminescence_experience_c",mod = hazard_model_3))
+plot(effects::Effect(focal.predictors = c("relative_trial_c"),mod = hazard_model_3))
+
+car::Anova(hazard_model_3,"II")
+check_model(hazard_model_3)
+check_collinearity(hazard_model_3)
+check_overdispersion(hazard_model_3)
+sjPlot::plot_model(hazard_model_3,
+                   sort.est = "sort.all",
+                   pred.type = "fe",
+                   show.values = TRUE,
+                   value.offset = -0.35)
+
+sjPlot::tab_model(hazard_model_3,
+                  show.intercept = FALSE,
+                  show.est = TRUE,
+                  show.dev = TRUE,
+                  show.loglik = TRUE,
+                  show.reflvl = TRUE)
+
+plot(ggpredict(hazard_model_3,
+               terms = ~ luminescence_experience_c + relative_trial_c + treatment_2 + type + time_point,
+               typical = "marginalmeans",bias_correction = TRUE))
+
+report::report_text(hazard_model_3)
+
+# ## run this part to get the plot of the effects outside R Mardown
+# jpeg(filename = "./submissions/biol_let/secondary/figures/Eaten_model_effects.jpeg",
+#      width = 20,height = 10,units = "in",res=300)
+# plot(effects::allEffects(hazard_model_3),ylab = "Instantaneous risk of being eaten")
+# dev.off()
+```
+
+Quickly plot the survival function across the time_points for simple visualization
+
+```{r}
+pred_grid <- expand.grid(
+  type = levels(msm_data_filtered$type),
+  treatment_2 = levels(msm_data_filtered$treatment_2),
+  relative_trial_c = seq(1:4),
+  luminescence_experience_c = 0, #seq(0,max(msm_data_filtered$luminescence_experience)),
+  time_point = levels(msm_data_filtered$time_point)
+)
+
+pred_grid$time_point <- factor(
+  pred_grid$time_point,
+  levels = levels(msm_data_filtered$time_point),
+  ordered = TRUE
+)
+
+X <- model.matrix(
+  lme4::nobars(formula(hazard_model_3, component = "cond"))[-2],
+  pred_grid
+)
+
+beta_hat <- fixef(hazard_model_3)$cond
+V_beta <- vcov(hazard_model_3)$cond
+
+set.seed(123)
+
+nsim <- 1000
+
+beta_sim <- MASS::mvrnorm(
+  nsim,
+  mu = beta_hat,
+  Sigma = V_beta
+)
+
+eta_sim <- X %*% t(beta_sim)
+
+haz_sim <- 1 - exp(-exp(eta_sim))
+
+sim_df <- bind_cols(
+  pred_grid,
+  as.data.frame(haz_sim)
+)
+
+names(sim_df)[(ncol(pred_grid)+1):ncol(sim_df)] <-
+  paste0("sim_", seq_len(nsim))
+
+plot_df <- sim_df %>%
+  arrange(type, treatment_2, relative_trial_c, time_point) %>%
+  group_by(type, treatment_2, relative_trial_c) %>%
+  mutate(
+    across(
+      starts_with("sim_"),
+      ~ 1 - cumprod(1 - .x)
+    )
+  ) %>%
+  ungroup()
+
+plot_df <- plot_df %>%
+  rowwise() %>%
+  mutate(
+    prob = mean(c_across(starts_with("sim_"))),
+    lower = quantile(c_across(starts_with("sim_")), 0.025),
+    upper = quantile(c_across(starts_with("sim_")), 0.975)
+  ) %>%
+  ungroup()
+
+plot_df <- plot_df %>%
+  mutate(
+    condition = interaction(
+      str_to_title(type),
+      str_to_title(treatment_2)
+    )
+  )
+
+ggplot(
+  plot_df,
+  aes(
+    x = time_point,
+    y = prob,
+    colour = condition,
+    fill = condition,
+    group = condition
+  )
+) +
+  geom_ribbon(
+    aes(ymin = lower, ymax = upper),
+    alpha = 0.15,
+    colour = NA
+  ) +
+  geom_line(linewidth = 1.2) +
+  geom_point(size = 3) +
+  coord_cartesian(ylim = c(0, 1)) +
+  labs(
+    x = "Time point",
+    y = "Cumulative probability of being eaten",
+    colour = "Condition",
+    fill = "Condition"
+  ) +
+  theme_bw(base_size = 20) + facet_nested(type + treatment_2 ~ relative_trial_c) + theme(strip.background = element_blank())
+
+```
+Will now generate the pairwise comparison table for the supplement, but comparing the relative risks for the different fixed effects
+
+```{r}
+
+## Pairwise comparisons for type and treatments shows in figure 2
+emm_type_exp <- emmeans(
+  hazard_model_3,
+  ~ type + treatment_2 | luminescence_experience_c,
+  at = list(
+    luminescence_experience_c = 0,
+    relative_trial_c = 0
+  ),
+  type = "response"
+)
+
+pairs(emm_type_exp)
+
+## Pairwise slope comparisons for type shown in figure 3
+
+exp_slopes <- emtrends(
+  hazard_model_3,
+  ~ type,
+  var = "luminescence_experience_c"
+)
+
+summary(exp_slopes)
+pairs(exp_slopes)
+
+## Pairwise slope comparisons for treatment shown in figure 3
+
+trial_slopes <- emtrends(
+  hazard_model_3,
+  ~ treatment_2,
+  var = "relative_trial_c"
+)
+
+summary(trial_slopes)
+pairs(trial_slopes)
+```
+
+Generate the prediciton grid for hazard model and the survival function
+
+```{r}
+## ----------------------------
+## 1. model-based survival predictions
+## ----------------------------
+
+pred_grid <- expand.grid(
+  type = levels(msm_data_filtered$type),
+  treatment_2 = levels(msm_data_filtered$treatment_2),
+  relative_trial_c = 0,
+  luminescence_experience_c = 0,
+  time_point = levels(msm_data_filtered$time_point)
+)
+
+## model matrix for fixed effects
+X <- model.matrix(
+  delete.response(terms(hazard_model_3)),
+  pred_grid
+)
+
+## fixed-effect estimates and covariance matrix
+beta_hat <- fixef(hazard_model_3)$cond
+V_beta <- vcov(hazard_model_3)$cond
+
+## simulate from fixed-effect uncertainty
+set.seed(123)
+
+nsim <- 1000
+
+beta_sim <- MASS::mvrnorm(
+  n = nsim,
+  mu = beta_hat,
+  Sigma = V_beta
+)
+
+## convert linear predictor -> cloglog hazard
+eta_sim <- X %*% t(beta_sim)
+
+haz_sim <- 1 - exp(-exp(eta_sim))
+
+## bind simulations to pred_grid
+sim_df <- bind_cols(
+  pred_grid,
+  as.data.frame(haz_sim)
+)
+
+names(sim_df)[(ncol(pred_grid) + 1):ncol(sim_df)] <- paste0("sim_", seq_len(nsim))
+
+## ----------------------------
+## 2. hazards -> cumulative probability eaten
+## ----------------------------
+
+## ----------------------------
+## 2. hazards -> cumulative probability eaten within trial
+## ----------------------------
+
+plot_df <- sim_df %>%
+  arrange(type, treatment_2, relative_trial_c, time_point) %>%
+  group_by(type, treatment_2, relative_trial_c) %>%
+  mutate(
+    across(
+      starts_with("sim_"),
+      ~ 1 - cumprod(1 - .x)
+    )
+  ) %>%
+  filter(time_point == levels(time_point)[nlevels(time_point)]) %>%
+  ungroup() %>%
+  group_by(type, treatment_2) %>%
+  summarise(
+    across(starts_with("sim_"), mean),
+    .groups = "drop"
+  ) %>%
+  rowwise() %>%
+  mutate(
+    pred  = mean(c_across(starts_with("sim_"))),
+    lower = quantile(c_across(starts_with("sim_")), 0.025),
+    upper = quantile(c_across(starts_with("sim_")), 0.975)
+  ) %>%
+  ungroup() %>%
+  mutate(
+    type = str_to_title(type),
+    treatment_2 = str_to_title(treatment_2),
+    type = fct_relevel(type, c("Luminescent", "Nonluminescent")),
+    treatment_2 = fct_relevel(treatment_2, c("Live", "Anaesthetized", "Dead")),
+    condition = interaction(type, treatment_2)
+  )
+
+## ----------------------------
+## 3. pairwise contrasts on final cumulative probability eaten
+## ----------------------------
+
+sim_long <- plot_df %>%
+  dplyr::select(type, treatment_2, condition, starts_with("sim_")) %>%
+  tidyr::pivot_longer(
+    cols = starts_with("sim_"),
+    names_to = "sim",
+    values_to = "pred_eaten"
+  )
+
+contrast_df <- sim_long %>%
+  dplyr::select(condition, sim, pred_eaten) %>%
+  tidyr::pivot_wider(
+    names_from = condition,
+    values_from = pred_eaten
+  )
+
+pairwise_contrasts <- combn(levels(plot_df$condition), 2, simplify = FALSE) %>%
+  purrr::map_dfr(function(x) {
+    diff <- contrast_df[[x[1]]] - contrast_df[[x[2]]]
+
+    tibble::tibble(
+      group1 = x[1],
+      group2 = x[2],
+      estimate = mean(diff),
+      lower = quantile(diff, 0.025),
+      upper = quantile(diff, 0.975),
+      significant = lower > 0 | upper < 0
+    )
+  })
+
+library(multcompView)
+
+p_mat <- matrix(
+  1,
+  nrow = nlevels(plot_df$condition),
+  ncol = nlevels(plot_df$condition),
+  dimnames = list(levels(plot_df$condition), levels(plot_df$condition))
+)
+
+for (i in seq_len(nrow(pairwise_contrasts))) {
+  p_mat[pairwise_contrasts$group1[i], pairwise_contrasts$group2[i]] <-
+    ifelse(pairwise_contrasts$significant[i], 0.01, 1)
+
+  p_mat[pairwise_contrasts$group2[i], pairwise_contrasts$group1[i]] <-
+    ifelse(pairwise_contrasts$significant[i], 0.01, 1)
+}
+
+letters_df <- multcompView::multcompLetters(
+  p_mat,
+  threshold = 0.05
+)$Letters %>%
+  tibble::enframe(
+    name = "condition",
+    value = ".group"
+  )
+
+plot_df <- plot_df %>%
+  left_join(letters_df, by = "condition")
+
+```
+
+Now plotting the bar chart for figure 2
+
+```{r Plotting the bar chat for Figure 2}
+
+## ----------------------------
+## 2. raw observed proportions for bars
+## ----------------------------
+
+bars_df <- msm_data_filtered %>%
+  group_by(exp_id) %>%
+  arrange(ind_id, trial, order, time_point, .by_group = TRUE) %>%
+  filter(time_point == last(time_point)) %>%
+  ungroup() %>%
+  mutate(
+    sample_id = case_when(
+      str_detect(sample_id, "photeros.boiled") ~ "photeros.dead",
+      str_detect(sample_id, "photeros.frozen") ~ "photeros.dead",
+      str_detect(sample_id, "skogsbergia.boiled") ~ "skogsbergia.dead",
+      str_detect(sample_id, "skogsbergia.frozen") ~ "skogsbergia.dead",
+      TRUE ~ sample_id
+    )
+  ) %>%
+  group_by(sample_id) %>%
+  summarise(
+    prop_eaten = mean(eaten == "yes"),
+    n = n(),
+    .groups = "drop"
+  ) %>%
+  mutate(
+    type = case_when(
+      str_detect(sample_id, "photeros") ~ "Luminescent",
+      str_detect(sample_id, "skogsbergia") ~ "Nonluminescent",
+      TRUE ~ NA_character_
+    ),
+    treatment_2 = case_when(
+      str_detect(sample_id, "live") ~ "Live",
+      str_detect(sample_id, "anaesthetized") ~ "Anaesthetized",
+      str_detect(sample_id, "dead") ~ "Dead",
+      TRUE ~ NA_character_
+    ),
+    type = fct_relevel(type, c("Luminescent", "Nonluminescent")),
+    treatment_2 = fct_relevel(treatment_2, c("Live", "Anaesthetized", "Dead")),
+    condition = interaction(type,treatment_2)
+  ) %>%
+  filter(!is.na(type), !is.na(treatment_2))
+
+## ----------------------------
+## 3. plot
+## ----------------------------
+
+pd <- position_dodge2(width = 0.75)
+
+Figure2 <- ggplot() +
+  geom_col(
+    data = bars_df,
+    aes(x = treatment_2, y = prop_eaten, fill = condition, colour = condition),
+    position = pd,
+    alpha = 1,
+    width = 0.75,
+    linewidth = 0.90
+  ) +
+  geom_text(
+    data = bars_df,
+    aes(x = treatment_2, y = -0.05, label = paste0("n = ", n), colour = condition),
+    position = pd,
+    size = 5
+  ) +
+  geom_linerange(
+    data = plot_df,
+    aes(x = treatment_2, ymin = lower, ymax = upper),
+    color = "black",
+    position = pd,
+    linewidth = 1.2
+  ) +
+  geom_point(
+    data = plot_df,
+    aes(x = treatment_2, y = pred, fill = condition, shape = condition),
+    color = "black",
+    position = pd,
+    size = 6.5,
+    stroke = 1.2
+  ) +
+  geom_text(
+    data = plot_df,
+    aes(x = treatment_2, y = 1.05, label = .group),
+    position = pd,
+    size = 10,
+    fontface = "bold"
+  ) +
+
+  scale_shape_manual(name = "Food Type",
+                     breaks = c('Luminescent.Live',
+                                'Luminescent.Anaesthetized',
+                                'Luminescent.Dead',
+                                'Nonluminescent.Live',
+                                'Nonluminescent.Anaesthetized',
+                                'Nonluminescent.Dead'
+                                ),
+                     values = c('Luminescent.Live' = 25,
+                                "Nonluminescent.Live" = 24,
+                                'Luminescent.Anaesthetized' = 25,
+                                'Nonluminescent.Anaesthetized' = 24,
+                                'Luminescent.Dead' = 25,
+                                'Nonluminescent.Dead' = 24
+                                )
+  ) +
+  
+  scale_color_manual(name = "Food Type",
+                     breaks = c('Luminescent.Live',
+                                'Luminescent.Anaesthetized',
+                                'Luminescent.Dead',
+                                'Nonluminescent.Live',
+                                'Nonluminescent.Anaesthetized',
+                                'Nonluminescent.Dead'
+                                ),
+                     values = c('Luminescent.Live' = "#376795",
+                                "Nonluminescent.Live" = "#e76254",
+                                'Luminescent.Anaesthetized' = "#528fad",
+                                'Nonluminescent.Anaesthetized' = "#ef7a57",
+                                'Luminescent.Dead' = "#72bcd5",
+                                'Nonluminescent.Dead' = "#f7aa58"
+                                )
+  ) +
+  
+  scale_fill_manual(name = "Food Type",
+                     breaks = c('Luminescent.Live',
+                                'Luminescent.Anaesthetized',
+                                'Luminescent.Dead',
+                                'Nonluminescent.Live',
+                                'Nonluminescent.Anaesthetized',
+                                'Nonluminescent.Dead'
+                                ),
+                     values = c('Luminescent.Live' = "#376795",
+                                "Nonluminescent.Live" = "#e76254",
+                                'Luminescent.Anaesthetized' = "#528fad",
+                                'Nonluminescent.Anaesthetized' = "#ef7a57",
+                                'Luminescent.Dead' = "#72bcd5",
+                                'Nonluminescent.Dead' = "#f7aa58"
+                                )
+  ) +
+  
+  coord_cartesian(ylim = c(-0.07, 1.1)) +
+  scale_y_continuous(breaks = c(0.25,0.50,0.75,1)) +
+  labs(
+    x = "Treatment",
+    y = "Proportion eaten (bars)\nCumulative predicted probability of being eaten + 95% CI (triangles + whiskers)"
+  ) +
+  theme_bw(base_size = 20)
+
+Figure2
+
+```
+
+
+```{r Saving figure2}
+
+ggsave(plot = Figure2,filename = "Figure2.jpeg", 
+       device = "jpeg",
+       width = 16,height = 11,units = "in",dpi = 300,
+       path = "/Users/nicholaihensley/Desktop/Burglar Alarm/submissions/biol_let/secondary/figures/")
+
+```
+
+Plotting the hazard model other fixed effects
+
+```{r Plotting the Eaten hazard model}
+library(MASS)
+library(dplyr)
+library(tidyr)
+library(stringr)
+library(forcats)
+library(ggplot2)
+
+inv_cloglog <- function(eta) {
+  1 - exp(-exp(eta))
+}
+
+lum_grid <- seq(
+  min(msm_data_filtered$luminescence_experience, na.rm = TRUE),
+  max(msm_data_filtered$luminescence_experience, na.rm = TRUE),
+  length.out = 200
+)
+
+trial_seq <- sort(unique(msm_data_filtered$relative_trial_c))
+
+lum_pred_grid <- expand.grid(
+  type = levels(msm_data_filtered$type),
+  treatment_2 = levels(msm_data_filtered$treatment_2),
+  luminescence_experience_c = lum_grid,
+  relative_trial_c = 0,
+  time_point = levels(msm_data_filtered$time_point)
+)
+
+X <- model.matrix(
+  lme4::nobars(formula(hazard_model_3, component = "cond"))[-2],
+  lum_pred_grid
+)
+
+beta_hat <- fixef(hazard_model_3)$cond
+V_beta <- vcov(hazard_model_3)$cond
+
+set.seed(123)
+nsim <- 1000
+
+beta_sim <- MASS::mvrnorm(nsim, beta_hat, V_beta)
+
+eta_sim <- X %*% t(beta_sim)
+haz_sim <- inv_cloglog(eta_sim)
+
+sim_df <- bind_cols(
+  lum_pred_grid,
+  as.data.frame(haz_sim)
+)
+
+names(sim_df)[(ncol(lum_pred_grid) + 1):ncol(sim_df)] <- paste0("sim_", seq_len(nsim))
+
+lum_df <- sim_df %>%
+  arrange(type, treatment_2, luminescence_experience_c, relative_trial_c, time_point) %>%
+  group_by(type, treatment_2, luminescence_experience_c, relative_trial_c) %>%
+  mutate(
+    across(starts_with("sim_"), ~ 1 - cumprod(1 - .x))
+  ) %>%
+  filter(time_point == levels(time_point)[nlevels(time_point)]) %>%
+  ungroup() %>%
+  group_by(type, luminescence_experience_c) %>%
+  summarise(
+    across(starts_with("sim_"), mean),
+    .groups = "drop"
+  ) %>%
+  rowwise() %>%
+  mutate(
+    prob = mean(c_across(starts_with("sim_"))),
+    asymp.LCL = quantile(c_across(starts_with("sim_")), 0.025),
+    asymp.UCL = quantile(c_across(starts_with("sim_")), 0.975)
+  ) %>%
+  ungroup() %>%
+  mutate(
+    x = luminescence_experience_c,
+    type = str_to_title(type)
+  )
+
+Fig3.p1 <- ggplot(lum_df, aes(x = x, y = prob, colour = type, fill = type)) +
+  geom_ribbon(aes(ymin = asymp.LCL, ymax = asymp.UCL), alpha = 0.15, colour = NA) +
+  geom_line(linewidth = 1) +
+    geom_rug(
+    data = subset(msm_data_filtered %>% mutate(type = str_to_title(type)), eaten == "no"),
+    aes(x = luminescence_experience, y = 0, color = type),
+    position = position_jitter(width = 0.05, height = 0),
+    inherit.aes = FALSE,
+    sides = "b",
+    alpha = 0.25
+  ) +
+  geom_rug(
+    data = subset(msm_data_filtered %>% mutate(type = str_to_title(type)), eaten == "yes"),
+    aes(x = luminescence_experience, y = 1, color = type),
+    position = position_jitter(width = 0.05, height = 0),
+    inherit.aes = FALSE,
+    sides = "t",
+    alpha = 0.25,
+  ) +
+  scale_color_manual(name = "Prey Type",
+                     values = c("Luminescent" = "#376795",
+                                "Nonluminescent" = "#e76254")) +
+  scale_fill_manual(name = "Prey Type",
+                    values = c("Luminescent" = "#376795",
+                               "Nonluminescent" = "#e76254")) +
+  labs(
+    x = "Luminescence experience",
+    y = "Cumulative predicted probability of being eaten",
+    colour = "Prey Type",
+    fill = "Prey Type"
+  ) +
+  coord_cartesian(ylim = c(0, 1)) +
+  theme_bw(base_size = 20) +
+  theme(legend.position = "top")
+
+Fig3.p1
+```
+
+
+```{r}
+trial_grid <- seq(
+  min(msm_data_filtered$relative_trial, na.rm = TRUE),
+  max(msm_data_filtered$relative_trial, na.rm = TRUE),
+  length.out = 200
+)
+
+trial_pred_grid <- expand.grid(
+  type = levels(msm_data_filtered$type),
+  treatment_2 = levels(msm_data_filtered$treatment_2),
+  relative_trial_c = trial_grid,
+  luminescence_experience_c = 0,
+  time_point = levels(msm_data_filtered$time_point)
+)
+
+X <- model.matrix(
+  lme4::nobars(formula(hazard_model_3, component = "cond"))[-2],
+  trial_pred_grid
+)
+
+eta_sim <- X %*% t(beta_sim)
+haz_sim <- inv_cloglog(eta_sim)
+
+sim_df <- bind_cols(
+  trial_pred_grid,
+  as.data.frame(haz_sim)
+)
+
+names(sim_df)[(ncol(trial_pred_grid) + 1):ncol(sim_df)] <- paste0("sim_", seq_len(nsim))
+
+trial_df <- sim_df %>%
+  arrange(treatment_2, type, luminescence_experience_c, relative_trial_c, time_point) %>%
+  group_by(treatment_2, type, luminescence_experience_c, relative_trial_c) %>%
+  mutate(
+    across(starts_with("sim_"), ~ 1 - cumprod(1 - .x))
+  ) %>%
+  filter(
+    time_point == levels(time_point)[nlevels(time_point)]
+  ) %>% 
+  ungroup() %>%
+  group_by(treatment_2, relative_trial_c) %>%
+  summarise(
+    across(starts_with("sim_"), mean),
+    .groups = "drop"
+  ) %>%
+  rowwise() %>%
+  mutate(
+    prob = mean(c_across(starts_with("sim_"))),
+    asymp.LCL = quantile(c_across(starts_with("sim_")), 0.025),
+    asymp.UCL = quantile(c_across(starts_with("sim_")), 0.975)
+  ) %>%
+  ungroup() %>%
+  mutate(
+    x = relative_trial_c,
+    treatment_2 = str_to_title(treatment_2),
+    treatment_2 = fct_relevel(treatment_2, c("Live", "Anaesthetized", "Dead"))
+  )
+
+Fig3.p2 <- ggplot(trial_df, aes(x = x, y = prob, colour = treatment_2, fill = treatment_2)) +
+  geom_ribbon(aes(ymin = asymp.LCL, ymax = asymp.UCL), alpha = 0.15, colour = NA) +
+  geom_line(linewidth = 1) +
+    geom_rug(
+    data = subset(msm_data_filtered %>% mutate(treatment_2 = str_to_title(treatment_2)), eaten == "no"),
+    aes(x = relative_trial, y = 0, color = treatment_2),
+    position = position_jitter(width = 0.15, height = 0),
+    inherit.aes = FALSE,
+    sides = "b",
+    alpha = 0.25
+  ) +
+  geom_rug(
+    data = subset(msm_data_filtered %>% mutate(treatment_2 = str_to_title(treatment_2)), eaten == "yes"),
+    aes(x = relative_trial, y = 1, color = treatment_2),
+    position = position_jitter(width = 0.15, height = 0),
+    inherit.aes = FALSE,
+    sides = "t",
+    alpha = 0.25,
+  ) +
+  scale_color_manual(name = "Prey Treatment",
+                     values = c("Live" = "#376795",
+                                "Anaesthetized" = "#528fad",
+                                "Dead" = "#72bcd5")) +
+  scale_fill_manual(name = "Prey Treatment",
+                    values = c("Live" = "#376795",
+                               "Anaesthetized" = "#528fad",
+                               "Dead" = "#72bcd5")) +
+  labs(
+    x = "Trial number",
+    y = "Cumulative predicted probability of being eaten",
+    colour = "Prey Treatment",
+    fill = "Prey Treatment"
+  ) +
+  coord_cartesian(ylim = c(0, 1)) +
+  theme_bw(base_size = 20) +
+  theme(legend.position = "top")
+
+Fig3.p2
+```
+
+Now plotting Figure 3
+
+```{r}
+# Combinding the fig3 plots
+Fig3 <- ggarrange(plotlist = c(Fig3.p1,Fig3.p2),ncol = 2,labels = "AUTO",align = "hv",font.label = list(size = 20))
+
+ggsave(plot = Fig3,filename = "Figure3.jpeg", 
+       device = "jpeg",
+       width = 18,height = 8,units = "in",dpi = 300,
+       path = "/Users/nicholaihensley/Desktop/Burglar Alarm/submissions/biol_let/secondary/figures/")
+```
+
+## Supplementary Results ##
+
+Plotting all the data even positive controls for the proportion eaten of each type and treatment
+
+```{r Plotting all eaten data for the supplement}
+
+bars_all_df <- data_filtered %>% 
+  filter(food_sample != "worm" | food_sample != "cumacean" | food_sample != "mysid") %>% 
+  group_by(exp_id) %>%
+  arrange(ind_id, trial, order, time_point, .by_group = TRUE) %>%
+  filter(time_point == last(time_point)) %>%
+  ungroup() %>%
+  mutate(
+    sample_id = case_when(
+      str_detect(sample_id, "photeros.boiled") ~ "photeros.dead",
+      str_detect(sample_id, "photeros.frozen") ~ "photeros.dead",
+      str_detect(sample_id, "skogsbergia.boiled") ~ "skogsbergia.dead",
+      str_detect(sample_id, "skogsbergia.frozen") ~ "skogsbergia.dead",
+      str_detect(sample_id, "isopod.control") ~ "isopod.control",
+      str_detect(sample_id, "fish.control") ~ "fish.control",
+      TRUE ~ sample_id
+    )
+  ) %>%
+  group_by(sample_id) %>%
+  summarise(
+    prop_eaten = mean(eaten == "yes"),
+    n = n(),
+    .groups = "drop"
+  ) %>%
+  mutate(
+    type = case_when(
+      str_detect(sample_id, "photeros") ~ "Luminescent",
+      str_detect(sample_id, "skogsbergia") ~ "Nonluminescent",
+      str_detect(sample_id, "isopod") ~ "Isopod",
+      str_detect(sample_id, "fish") ~ "Fish",
+      TRUE ~ NA_character_
+    ),
+    treatment_2 = case_when(
+      str_detect(sample_id, "live") ~ "Live",
+      str_detect(sample_id, "anaesthetized") ~ "Anaesthetized",
+      str_detect(sample_id, "dead") ~ "Dead",
+      str_detect(sample_id, "control") ~ "Control",
+      TRUE ~ NA_character_
+    ),
+    type = fct_relevel(type, c("Fish","Isopod","Luminescent", "Nonluminescent")),
+    treatment_2 = fct_relevel(treatment_2, c("Control","Live", "Anaesthetized", "Dead")),
+    condition = interaction(type,treatment_2)
+  ) %>%
+  filter(!is.na(type), !is.na(treatment_2))
+
+FigureS5 <- ggplot() +
+  geom_col(
+    data = bars_all_df,
+    aes(x = treatment_2, y = prop_eaten, fill = condition, colour = condition),
+    position = pd,
+    alpha = 1,
+    width = 0.75,
+    linewidth = 0.90
+  ) +
+  geom_text(
+    data = bars_all_df,
+    aes(x = treatment_2, y = -0.05, label = paste0("n = ", n), colour = condition),
+    position = pd,
+    size = 5
+  ) +
+  scale_color_manual(name = "Food Type",
+                     breaks = c('Fish.Control',
+                                'Isopod.Control',
+                                'Luminescent.Live',
+                                'Luminescent.Anaesthetized',
+                                'Luminescent.Dead',
+                                'Nonluminescent.Live',
+                                'Nonluminescent.Anaesthetized',
+                                'Nonluminescent.Dead'
+                                ),
+                     values = c("Fish.Control" = "grey75",
+                                "Isopod.Control" = "grey75",
+                                'Luminescent.Live' = "#376795",
+                                "Nonluminescent.Live" = "#e76254",
+                                'Luminescent.Anaesthetized' = "#528fad",
+                                'Nonluminescent.Anaesthetized' = "#ef7a57",
+                                'Luminescent.Dead' = "#72bcd5",
+                                'Nonluminescent.Dead' = "#f7aa58"
+                                )
+  ) +
+  
+  scale_fill_manual(name = "Food Type",
+                     breaks = c('Fish.Control',
+                                'Isopod.Control',
+                                'Luminescent.Live',
+                                'Luminescent.Anaesthetized',
+                                'Luminescent.Dead',
+                                'Nonluminescent.Live',
+                                'Nonluminescent.Anaesthetized',
+                                'Nonluminescent.Dead'
+                                ),
+                     values = c("Fish.Control" = "grey75",
+                                "Isopod.Control" = "grey75",
+                                'Luminescent.Live' = "#376795",
+                                "Nonluminescent.Live" = "#e76254",
+                                'Luminescent.Anaesthetized' = "#528fad",
+                                'Nonluminescent.Anaesthetized' = "#ef7a57",
+                                'Luminescent.Dead' = "#72bcd5",
+                                'Nonluminescent.Dead' = "#f7aa58"
+                                )
+  ) +
+  
+  coord_cartesian(ylim = c(-0.07, 1.1)) +
+  scale_y_continuous(breaks = c(0.25,0.50,0.75,1)) +
+  labs(
+    x = "Treatment",
+    y = "Proportion eaten (bars)"
+  ) +
+  theme_bw(base_size = 20)
+
+FigureS5
+
+ggsave(plot = FigureS5,filename = "FigureS5.jpeg", 
+       device = "jpeg",
+       width = 13,height = 8,units = "in",dpi = 300,
+       path = "/Users/nicholaihensley/Desktop/Burglar Alarm/submissions/biol_let/secondary/figures/")
+```
+
+### A separate analysis looking at experience with Photeros during attacks versus luminous signal exposure
+
+```{r Photeros experience model}
+
+msm_photeros <- msm_data_filtered %>% 
+    filter(genus != "Stegastes") %>% 
+    tidyr::replace_na(list(photeros_attack_experience = 0))
+
+## same as the hazard_model_3 but using the redefined dataset to use the photeros experience without NAs
+hazard_model_4 <- glmmTMB(
+  eaten ~ type + treatment_2 + relative_trial_c + 
+    luminescence_experience_c + 
+    # photeros_attack_experience + 
+    time_point + 
+    type:luminescence_experience_c +
+    treatment_2:relative_trial_c +
+    (1 | ind_id ),
+  family = binomial("cloglog"),
+  REML = FALSE,
+  data = msm_photeros,
+  control = glmmTMBControl(optArgs = list(method = "L-BFGS-B"))
+)
+
+check_model(hazard_model_4)
+check_collinearity(hazard_model_4)
+summary(hazard_model_4)
+drop1(hazard_model_4,test="Chisq")
+
+## photeros experience should be dropped if included in the model according to the Chi-sq test
+
+hazard_model_5 <- glmmTMB(
+  eaten ~ type + treatment_2 + relative_trial_c + photeros_attack_experience + time_point +
+    type:photeros_attack_experience +
+    treatment_2:relative_trial_c +
+    (1 | ind_id ),
+  family = binomial("cloglog"),
+  REML = FALSE,
+  data = msm_photeros,
+  control = glmmTMBControl(optArgs = list(method = "L-BFGS-B"))
+)
+
+compare_performance(hazard_model_4,hazard_model_5)
+test_performance(hazard_model_4,hazard_model_5)
+
+## in a model with either photeros attack OR luminescence experience
+```
+The model with the photeros_attack_experience is marginally worse with the BF, but AICc are worse and the R^2 are also worse. This supports that the model with the luminescence_experience is a better predictor of whether food is eaten than simply just attacking / experiencing the food. There does seem to be genus level differences, and we know that from looking at the prey response rates to the two different remaining genera, but the models are equivocal with and without it. Including it does not change the results.
+
+
+### Looking at the Attack Model now
+
+```{r Attack Model}
+
+attack_model_1 <- glmmTMB(
+  attacked ~ type + treatment_2 + relative_trial_c + luminescence_experience_c + order + time_point + genus +
+    # type:time_point + #too high of VIF
+    # treatment_2:time_point + #too high of VIF
+    order:relative_trial_c +
+    type:luminescence_experience_c +
+    type:relative_trial_c + 
+    treatment_2:relative_trial_c +
+    treatment_2:luminescence_experience_c +
+    (1 | ind_id / trial / sample_id),
+  family = binomial("cloglog"),
+  REML = FALSE,
+  data = msm_data %>% filter(genus != "Stegastes"), #using the entire data set with and without attacks
+)
+
+check_collinearity(attack_model_1)
+drop1(attack_model_1,test = "Chisq")
+
+# drop1 indicates to get rid of none besides the time_points VIFs interactions
+
+
+```
+
+
+```{r Attack Model Results}
+
+summary(attack_model_1)
+
+plot(effects::allEffects(attack_model_1),ylab = "Instantaneous risk of attack")
+
+plot(effects::Effect(focal.predictors = "time_point",
+                     mod = attack_model_1),ylab = "Instantaneous risk of attack")
+plot(effects::Effect(focal.predictors = c("type","luminescence_experience_c"),
+                                          mod = attack_model_1),ylab = "Instantaneous risk of attack")
+plot(effects::Effect(focal.predictors = c("type","relative_trial_c"),
+                                          mod = attack_model_1),ylab = "Instantaneous risk of attack")
+plot(effects::Effect(focal.predictors = c("treatment_2","luminescence_experience_c"),
+                     mod = attack_model_1),ylab = "Instantaneous risk of attack")
+plot(effects::Effect(focal.predictors = c("treatment_2","relative_trial_c"),
+                                          mod = attack_model_1),ylab = "Instantaneous risk of attack")
+
+car::Anova(attack_model_1,"II")
+check_model(attack_model_1)
+check_collinearity(attack_model_1)
+check_overdispersion(attack_model_1)
+sjPlot::plot_model(attack_model_1,
+                   sort.est = "sort.all",
+                   pred.type = "fe",
+                   show.values = TRUE,
+                   value.offset = -0.35)
+```
+
+
+```{r Attack Model Table}
+
+## to save the effect plot, must run this part outside the markdown
+# jpeg(filename = "./submissions/biol_let/secondary/figures/Attack_model_effects.jpeg",
+#      width = 20,height = 10,units = "in",res=300)
+# plot(effects::allEffects(attack_model_3),ylab = "Instantaneous risk of attack")
+# dev.off()
+
+sjPlot::tab_model(attack_model_1,
+                  show.intercept = FALSE,
+                  show.est = TRUE,
+                  show.dev = TRUE,
+                  show.loglik = TRUE,
+                  show.reflvl = TRUE)
+
+car::Anova(attack_model_1)
+```
+
+Plotting the cumulative probability of being eaten for the effects of the attack model as well. I need the following plots:
+
+1) Time point x Order x Genus
+2) Type x Experience x Trail 
+3) Treatment x Experience x Trial
+
+```{r Attack model: time point}
+
+pred_grid <- expand.grid(
+  type = levels(msm_data$type),
+  treatment_2 = levels(msm_data$treatment_2),
+  relative_trial_c = 0, #seq(1:4),
+  luminescence_experience_c = 0, #seq(0,max(msm_data_filtered$luminescence_experience)),
+  time_point = levels(msm_data$time_point),
+  order = levels(msm_data$order),
+  genus = c("Abudefduf","Phaeoptyx")
+)
+
+pred_grid$time_point <- factor(
+  pred_grid$time_point,
+  levels = levels(msm_data$time_point),
+  ordered = TRUE
+)
+
+X <- model.matrix(
+  lme4::nobars(formula(attack_model_1, component = "cond"))[-2],
+  pred_grid
+)
+
+beta_hat <- fixef(attack_model_1)$cond
+V_beta <- vcov(attack_model_1)$cond
+
+set.seed(123)
+
+nsim <- 1000
+
+beta_sim <- MASS::mvrnorm(
+  nsim,
+  mu = beta_hat,
+  Sigma = V_beta
+)
+
+eta_sim <- X %*% t(beta_sim)
+
+haz_sim <- 1 - exp(-exp(eta_sim))
+
+sim_df <- bind_cols(
+  pred_grid,
+  as.data.frame(haz_sim)
+)
+
+names(sim_df)[(ncol(pred_grid)+1):ncol(sim_df)] <-
+  paste0("sim_", seq_len(nsim))
+
+plot_df <- sim_df %>%
+  arrange(genus, type, treatment_2, order, relative_trial_c, luminescence_experience_c, time_point) %>%
+  group_by(genus, type, treatment_2, order, relative_trial_c, luminescence_experience_c) %>%
+  mutate(
+    across(
+      starts_with("sim_"),
+      ~ 1 - cumprod(1 - .x)
+    )
+  ) %>%
+  ungroup()
+
+plot_df <- plot_df %>%
+  rowwise() %>%
+  mutate(
+    prob = mean(c_across(starts_with("sim_"))),
+    lower = quantile(c_across(starts_with("sim_")), 0.025),
+    upper = quantile(c_across(starts_with("sim_")), 0.975)
+  ) %>%
+  ungroup()
+
+plot_df <- plot_df %>%
+  mutate(
+    condition = interaction(
+      str_to_title(type),
+      str_to_title(treatment_2)
+    )
+  )
+
+FigureS6_1 <- ggplot(
+  plot_df,
+  aes(
+    x = time_point,
+    y = prob
+  )
+) +
+  geom_ribbon(
+    aes(ymin = lower, ymax = upper,fill=condition,group=condition),
+    alpha = 0.1
+  ) +
+  geom_line(linewidth = 1.2,aes(color=condition,group=condition)) +
+  geom_point(size = 3,aes(fill=condition),color="black",shape=21) +
+  coord_cartesian(ylim = c(0, 1)) +
+  labs(
+    x = "Time point",
+    y = "Cumulative probability of being attacked",
+    color = "Type.Treatment",
+    fill = "Type.Treatment",
+  ) +
+  theme_bw(base_size = 20) + facet_grid(genus ~ order) + 
+  theme(strip.background = element_blank(),
+        strip.text.y = element_text(face = "italic"))
+
+FigureS6_1
+```
+
+
+```{r Attack model: Type x Trial x Experience}
+
+pred_grid <- expand.grid(
+  type = levels(msm_data$type),
+  treatment_2 = levels(msm_data$treatment_2),
+  relative_trial_c = seq(1,4),
+  luminescence_experience_c = seq(0,18),
+  time_point = levels(msm_data$time_point),
+  order = levels(msm_data$order),
+  genus = c("Abudefduf","Phaeoptyx")
+)
+
+pred_grid$time_point <- factor(
+  pred_grid$time_point,
+  levels = levels(msm_data$time_point),
+  ordered = TRUE
+)
+
+X <- model.matrix(
+  lme4::nobars(formula(attack_model_1, component = "cond"))[-2],
+  pred_grid
+)
+
+beta_hat <- fixef(attack_model_1)$cond
+V_beta <- vcov(attack_model_1)$cond
+
+set.seed(123)
+
+nsim <- 1000
+
+beta_sim <- MASS::mvrnorm(
+  nsim,
+  mu = beta_hat,
+  Sigma = V_beta
+)
+
+eta_sim <- X %*% t(beta_sim)
+
+haz_sim <- 1 - exp(-exp(eta_sim))
+
+sim_df <- bind_cols(
+  pred_grid,
+  as.data.frame(haz_sim)
+)
+
+names(sim_df)[(ncol(pred_grid)+1):ncol(sim_df)] <-
+  paste0("sim_", seq_len(nsim))
+
+plot_df <- sim_df %>%
+  arrange(genus, type, order, treatment_2, relative_trial_c, luminescence_experience_c, time_point) %>%
+  group_by(genus, type, order, treatment_2, relative_trial_c, luminescence_experience_c, ) %>%
+  mutate(
+    across(starts_with("sim_"), ~ 1 - cumprod(1 - .x))
+  ) %>%
+  filter(time_point == levels(time_point)[nlevels(time_point)]) %>%
+  ungroup() %>%
+  group_by(type, luminescence_experience_c, relative_trial_c) %>%
+  summarise(
+    across(starts_with("sim_"), mean),
+    .groups = "drop"
+  ) %>%
+  rowwise() %>%
+  mutate(
+    prob  = mean(c_across(starts_with("sim_"))),
+    lower = quantile(c_across(starts_with("sim_")), 0.025),
+    upper = quantile(c_across(starts_with("sim_")), 0.975)
+  ) %>%
+  ungroup() %>%
+  mutate(
+    type = str_to_title(type)
+  )
+
+FigureS6_2 <- ggplot(
+  plot_df,
+  aes(
+    x = as.numeric(luminescence_experience_c),
+    y = prob,
+    colour = type,
+    fill = type,
+    group = type
+  )
+) +
+  geom_ribbon(aes(ymin = lower, ymax = upper),
+              alpha = 0.15,
+              colour = NA) +
+  geom_line(linewidth = 1.2, aes(color = type)) +
+  coord_cartesian(ylim = c(0, 1)) +
+  labs(
+    x = "Luminescence experience",
+    y = "Cumulative probability of being attacked",
+    colour = "Type",
+    fill = "Type"
+  ) +
+  theme_bw(base_size = 20) + facet_grid(. ~ as.numeric(relative_trial_c)) + 
+  theme(strip.background = element_blank())
+
+FigureS6_2
+```
+
+
+```{r Attack model: Treatment x Trial x Experience}
+
+pred_grid <- expand.grid(
+  type = levels(msm_data$type),
+  treatment_2 = levels(msm_data$treatment_2),
+  relative_trial_c = seq(1,4),
+  luminescence_experience_c = seq(0,18),
+  time_point = levels(msm_data$time_point),
+  order = levels(msm_data$order),
+  genus = c("Abudefduf","Phaeoptyx")
+)
+
+pred_grid$time_point <- factor(
+  pred_grid$time_point,
+  levels = levels(msm_data$time_point),
+  ordered = TRUE
+)
+
+X <- model.matrix(
+  lme4::nobars(formula(attack_model_1, component = "cond"))[-2],
+  pred_grid
+)
+
+beta_hat <- fixef(attack_model_1)$cond
+V_beta <- vcov(attack_model_1)$cond
+
+set.seed(123)
+
+nsim <- 1000
+
+beta_sim <- MASS::mvrnorm(
+  nsim,
+  mu = beta_hat,
+  Sigma = V_beta
+)
+
+eta_sim <- X %*% t(beta_sim)
+
+haz_sim <- 1 - exp(-exp(eta_sim))
+
+sim_df <- bind_cols(
+  pred_grid,
+  as.data.frame(haz_sim)
+)
+
+names(sim_df)[(ncol(pred_grid)+1):ncol(sim_df)] <-
+  paste0("sim_", seq_len(nsim))
+
+plot_df <- sim_df %>%
+  arrange(genus, type, order, treatment_2, relative_trial_c, luminescence_experience_c, time_point) %>%
+  group_by(genus, type, order, treatment_2, relative_trial_c, luminescence_experience_c, ) %>%
+  mutate(
+    across(starts_with("sim_"), ~ 1 - cumprod(1 - .x))
+  ) %>%
+  filter(time_point == levels(time_point)[nlevels(time_point)]) %>%
+  ungroup() %>%
+  group_by(treatment_2, luminescence_experience_c, relative_trial_c) %>%
+  summarise(
+    across(starts_with("sim_"), mean),
+    .groups = "drop"
+  ) %>%
+  rowwise() %>%
+  mutate(
+    prob  = mean(c_across(starts_with("sim_"))),
+    lower = quantile(c_across(starts_with("sim_")), 0.025),
+    upper = quantile(c_across(starts_with("sim_")), 0.975)
+  ) %>%
+  ungroup() %>%
+  mutate(
+    type = str_to_title(treatment_2)
+  )
+
+FigureS6_3 <- ggplot(
+  plot_df,
+  aes(
+    x = as.numeric(luminescence_experience_c),
+    y = prob,
+    colour = treatment_2,
+    fill = treatment_2,
+    group = treatment_2
+  )
+) +
+  geom_ribbon(aes(ymin = lower, ymax = upper),
+              alpha = 0.15,
+              colour = NA) +
+  geom_line(linewidth = 1.2, aes(color = treatment_2)) +
+  coord_cartesian(ylim = c(0, 1)) +
+  labs(
+    x = "Luminescence experience",
+    y = "Cumulative probability of being attacked",
+    colour = "Treatment",
+    fill = "Treatment"
+  ) +
+  theme_bw(base_size = 20) + facet_grid(. ~ as.numeric(relative_trial_c)) + 
+  theme(strip.background = element_blank())
+
+FigureS6_3
+```
+
+```{r Saving them as a plot}
+Fig6_row1 <- ggarrange(FigureS6_1,ncol = 1,nrow = 1,legend = "top")
+Fig6_row2 <- ggarrange(FigureS6_2,FigureS6_3,nrow = 2,ncol = 1,legend = "top")
+FigS6 <- ggarrange(Fig6_row1,Fig6_row2,ncol = 1)
+FigS6
+ggsave(filename = "FigureS6.jpeg",plot = FigS6,device = "jpeg",
+       path = "./submissions/biol_let/secondary/figures/",width = 15,height = 18,units = "in",dpi = 300)
+```
+
+
+
+
