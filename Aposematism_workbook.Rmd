@@ -759,7 +759,7 @@ The genus Stegastes accumulates very little experience, so I will exclude it fro
 ```{r Eaten Model}
 
 hazard_model_1 <- glmmTMB(
-  eaten ~ type + treatment_2 + relative_trial_c + luminescence_experience_c + order + time_point + genus +
+  eaten ~ type + treatment_2 + relative_trial_c + luminescence_experience_c + order + time_point + genus + order:relative_trial_c +
     type:time_point +
     treatment:time_point +
     type:luminescence_experience_c +
@@ -778,7 +778,7 @@ hazard_model_1 <- glmmTMB(
 drop1(hazard_model_1,test = "Chisq")
 ```
 
-Drop genus, order, type:trial, and treatment:experience are not important without Stegastes in it, so will remove to be consistent with the attack rate model as well, as they don't experience much luminous responses
+Drop genus, order, order:trial, type:trial, and treatment:experience are not important without Stegastes in it, so will remove to be consistent with the attack rate model as well, as they don't experience much luminous responses
 
 ```{r Eaten Model Round 2}
 hazard_model_2 <- glmmTMB(
@@ -1170,6 +1170,10 @@ letters_df <- multcompView::multcompLetters(
 plot_df <- plot_df %>%
   left_join(letters_df, by = "condition")
 
+## visualizing the distributions of the simulations for each group
+sim_long %>% ggplot(aes(x = pred_eaten)) + 
+  geom_histogram(aes(color=condition,fill=condition), alpha = 0.15,position = "identity") + 
+  theme_bw() + xlab("Cumulative Probability of Being Eaten (n = 1000)") + ylab("Count")
 ```
 
 Now plotting the bar chart for figure 2
@@ -1807,6 +1811,8 @@ sjPlot::tab_model(attack_model_1,
                   show.reflvl = TRUE)
 
 car::Anova(attack_model_1)
+
+report::report(attack_model_1)
 ```
 
 Plotting the cumulative probability of being eaten for the effects of the attack model as well. I need the following plots:
