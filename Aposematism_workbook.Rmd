@@ -858,12 +858,17 @@ sjPlot::plot_model(hazard_model_3,
                    show.values = TRUE,
                    value.offset = -0.35)
 
+inv_cloglog_transform <- function(x) {
+  1 - exp(-exp(x))
+  }
+
 sjPlot::tab_model(hazard_model_3,
                   show.intercept = FALSE,
                   show.est = TRUE,
                   show.dev = TRUE,
                   show.loglik = TRUE,
-                  show.reflvl = TRUE)
+                  show.reflvl = TRUE,
+                  transform = "inv_cloglog_transform")
 
 plot(ggpredict(hazard_model_3,
                terms = ~ luminescence_experience_c + relative_trial_c + treatment_2 + type + time_point,
@@ -1808,7 +1813,8 @@ sjPlot::tab_model(attack_model_1,
                   show.est = TRUE,
                   show.dev = TRUE,
                   show.loglik = TRUE,
-                  show.reflvl = TRUE)
+                  show.reflvl = TRUE,
+                  transform = "inv_cloglog_transform")
 
 car::Anova(attack_model_1)
 
